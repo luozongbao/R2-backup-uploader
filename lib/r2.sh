@@ -66,8 +66,10 @@ r2::error() { r2::log error "$@"; }
 # Environment loading + validation
 # -----------------------------------------------------------------------------
 # r2::load_env <path-to-env-file>
-# Sources the file, strips comments, sets defaults for optional vars,
-# and validates required variables.
+# Sources the file, sets defaults for optional vars, and validates required
+# variables. Pre-existing environment variables (from the calling shell) take
+# precedence over values defined in the file — this lets users do things like
+# `DRY_RUN=true ./bin/r2-upload.sh` without editing .env.
 r2::load_env() {
     local env_file="${1:-./.env}"
 
@@ -76,10 +78,61 @@ r2::load_env() {
         return 1
     fi
 
-    # shellcheck disable=SC1090
-    set -a
-    source "$env_file"
-    set +a
+    # Source the .env file, but only set variables that are not already set
+    # in the environment. This preserves caller-provided overrides.
+    local line key val
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Strip leading whitespace and skip blank lines.
+        line="${line#"${line%%[![:space:]]*}"}"
+        [[ -z "$line" ]] && continue
+
+        # Skip full-line comments (lines starting with optional whitespace + #).
+        [[ "$line" =~ ^# ]] && continue
+
+        # Strip inline comments: anything from " #" to end of line, but not
+        # inside quoted strings.
+        local stripped=""
+        local i ch in_sq in_dq
+        in_sq=0
+        in_dq=0
+        for (( i=0; i<${#line}; i++ )); do
+            ch="${line:$i:1}"
+            if (( in_sq == 0 )) && [[ "$ch" == '"' ]]; then
+                in_dq=$((1-in_dq))
+            elif (( in_dq == 0 )) && [[ "$ch" == "'" ]]; then
+                in_sq=$((1-in_sq))
+            fi
+            # Detect " #" start-of-comment outside quotes.
+            if (( in_sq == 0 && in_dq == 0 )) && [[ "$ch" == " " ]]; then
+                local rest="${line:$i}"
+                if [[ "$rest" =~ ^\ +# ]]; then
+                    break
+                fi
+            fi
+            stripped+="$ch"
+        done
+        line="$stripped"
+
+        # Skip if line became empty after comment strip.
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+
+        # Match KEY=VALUE (or KEY="VALUE").
+        if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+            key="${BASH_REMATCH[1]}"
+            val="${BASH_REMATCH[2]}"
+            # Strip surrounding quotes if present.
+            if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then
+                val="${BASH_REMATCH[1]}"
+            fi
+            # Only assign if not already exported.
+            if [[ -z "${!key:-}" ]]; then
+                printf -v "$key" '%s' "$val"
+                export "$key"
+            fi
+        fi
+    done < "$env_file"
 
     # Defaults for optional vars.
     : "${R2_REGION:=auto}"
@@ -143,9 +196,17 @@ r2::require_cmd() {
 # AWS CLI wrapper
 # -----------------------------------------------------------------------------
 # r2::aws <args...>
-# Wraps the aws CLI with the R2 endpoint and region.
+# Wraps the aws CLI with the R2 endpoint, region, and credentials. We use env
+# so credentials don't appear in `ps` output. Note: `VAR=val cmd args` in Bash
+# returns the exit of `cmd`, but here we run inside a function — the actual
+# exit code of `aws` is preserved by `env` which we use to avoid the
+# assignment-prefix ambiguity.
 r2::aws() {
-    aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" "$@"
+    env \
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+        AWS_DEFAULT_REGION="$R2_REGION" \
+        aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" "$@"
 }
 
 # -----------------------------------------------------------------------------
