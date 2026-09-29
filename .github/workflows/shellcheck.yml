@@ -1,0 +1,28 @@
+# filepath: .github/workflows/shellcheck.yml
+name: shellcheck
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          additional_files: bin/*.sh lib/*.sh
+          ignore_paths: examples/
+
+      - name: Show version
+        run: shellcheck --version
