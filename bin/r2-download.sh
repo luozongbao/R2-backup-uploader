@@ -74,6 +74,9 @@ done
 # -----------------------------------------------------------------------------
 r2::start_run download
 
+# Load .env first so EMAIL_TO is available for -e validation.
+r2::load_env "$CONFIG_FILE" || exit 1
+
 if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
     EMAIL_ENABLED=true
     if [[ -n "$EMAIL_VALUE" ]]; then
@@ -82,15 +85,6 @@ if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
     if [[ -z "$EMAIL_VALUE" && -z "${EMAIL_TO:-}" ]]; then
         echo "Error: -e/--email requested but no EMAIL_TO set in .env and no ADDRESS given" >&2
         exit 2
-    fi
-fi
-
-r2::load_env "$CONFIG_FILE" || exit 1
-
-if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
-    EMAIL_ENABLED=true
-    if [[ -n "$EMAIL_VALUE" ]]; then
-        __R2_RUN_EMAIL_OVERRIDE="$EMAIL_VALUE"
     fi
 fi
 
