@@ -1,0 +1,20 @@
+# filepath: examples/crontab.example
+# Sample crontab entries for R2 Backup Uploader.
+# Install with:  crontab examples/crontab.example
+#
+# Environment:
+#   Set REQUIRE_CONFIRM=false for unattended runs.
+#   Optionally set DRY_RUN=true for a no-op test schedule.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=ops@example.com
+
+# Daily backup of /var/backups at 02:30, keep last 30 days locally.
+30 2 * * *  cd /opt/R2-backup-uploader && REQUIRE_CONFIRM=false ./bin/r2-upload.sh --config /etc/r2/prod.env >> /var/log/r2-upload.log 2>&1
+
+# Weekly archive rotation: download last week's logs and delete from R2.
+0 4 * * 0  cd /opt/R2-backup-uploader && REQUIRE_CONFIRM=false DOWNLOAD_DELETE_REMOTE=false ./bin/r2-download.sh --config /etc/r2/prod.env --prefix "logs/$(hostname)/" >> /var/log/r2-download.log 2>&1
+
+# Hourly sync of recent backups to a staging bucket.
+0 * * * *  cd /opt/R2-backup-uploader && REQUIRE_CONFIRM=false ./bin/r2-download.sh --config /etc/r2/staging.env --dest /srv/staging/ >> /var/log/r2-sync.log 2>&1

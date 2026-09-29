@@ -70,6 +70,7 @@ R2-backup-uploader/
 - **Bash** >= 4.0
 - **AWS CLI v2** (supports Cloudflare R2 via custom endpoints)
 - **tar** (for directory compression)
+- **msmtp** (optional — only required if you want email notifications; see [Email Notifications](#email-notifications))
 - **Standard Unix tools**: `date`, `hostname`, `sed`, `grep`
 
 ### Install AWS CLI v2
@@ -194,6 +195,18 @@ LOG_FILE=""
 | `LOG_LEVEL` | Logging level (`debug` \| `info` \| `warn` \| `error`) | `info` | ❌ |
 | `LOG_FILE` | Log file path (empty = stderr only) | `""` | ❌ |
 
+**Email Notifications** (sender comes from `~/.msmtprc`)
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `EMAIL_ENABLED` | Master switch for notifications | `false` | ❌ |
+| `EMAIL_TO` | Recipients (comma-separated supported) | `""` | ✅ if `EMAIL_ENABLED` |
+| `EMAIL_SUBJECT_OK` | Subject on success (supports `$(hostname)`, `$(date)`) | `[R2] Upload OK: ...` | ❌ |
+| `EMAIL_SUBJECT_FAIL` | Subject on failure | `[R2] Upload FAILED: ...` | ❌ |
+| `EMAIL_ON_SUCCESS` | Send on successful run | `true` | ❌ |
+| `EMAIL_ON_FAILURE` | Send on failed run | `true` | ❌ |
+| `MSMTP_ACCOUNT` | Which `~/.msmtprc` account to use | `default` | ❌ |
+
 ---
 
 ## Usage
@@ -211,6 +224,7 @@ LOG_FILE=""
 | `--config <path>` | Path to `.env` file (default: `./.env`) |
 | `--source <path>` | Override `SOURCE_PATH` from config |
 | `--dry-run` | Show what would happen without uploading |
+| `-e`, `--email [ADDR]` | Send notification email. If `ADDR` is given it overrides `EMAIL_TO`; if omitted, `EMAIL_TO` from `.env` is used. Errors if neither is set. |
 | `--help` | Show help message |
 
 ---
@@ -271,6 +285,7 @@ The `r2-download.sh` script retrieves data from R2. Because R2 is S3-compatible,
 | `--dest <dir>` | Override `DOWNLOAD_DEST` |
 | `--delete-remote` | Delete from R2 after successful download (DR rotation) |
 | `--dry-run` | Show what would happen without downloading |
+| `-e`, `--email [ADDR]` | Send notification email. If `ADDR` is given it overrides `EMAIL_TO`; if omitted, `EMAIL_TO` from `.env` is used. Errors if neither is set. |
 | `--help` | Show help message |
 
 > If neither `--key` nor `--prefix` is given, the script syncs the expanded `R2_PATH_PREFIX`.
@@ -320,6 +335,92 @@ If the upload was a tar.gz archive (from `SOURCE_COMPRESS=true`), restore with:
 # Extract
 tar -xzf ./downloads/site-2026-09-29.tar.gz -C /var/www/
 ```
+
+---
+
+## Email Notifications
+
+Both scripts can send a plain-text email summary at the end of each run (success or failure). The **sender** address is taken from your `~/.msmtprc` file, so configure that once and don't worry about it per-script.
+
+### Install `msmtp`
+
+| Distro | Command |
+|--------|---------|
+| Ubuntu / Debian | `sudo apt-get install msmtp msmtp-mta` |
+| RHEL / Fedora | `sudo dnf install msmtp` |
+| macOS | `brew install msmtp` |
+
+### Configure `~/.msmtprc`
+
+```ini
+# filepath: ~/.msmtprc
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        ~/.msmtp.log
+
+account        default
+host           smtp.gmail.com
+port           587
+from           your-email@example.com
+user           your-email@example.com
+passwordeval   "security find-generic-password -ws 'msmtp'"
+
+# Or use a different account:
+account        ops
+host           smtp.example.com
+port           587
+from           ops@example.com
+user           ops@example.com
+password       your-app-password
+```
+
+Then `chmod 600 ~/.msmtprc`.
+
+### Enable in `.env`
+
+Set `EMAIL_ENABLED=true` and provide recipients:
+
+```bash
+EMAIL_ENABLED="true"
+EMAIL_TO="ops@example.com,oncall@example.com"   # comma-separated for multiple
+EMAIL_SUBJECT_OK="[R2] OK: $(hostname) at $(date)"
+EMAIL_SUBJECT_FAIL="[R2] FAILED: $(hostname) at $(date)"
+EMAIL_ON_SUCCESS="true"
+EMAIL_ON_FAILURE="true"
+MSMTP_ACCOUNT="ops"                             # which account from .msmtprc
+```
+
+### Usage
+
+```bash
+# Use EMAIL_TO from .env (when EMAIL_ENABLED=true)
+./bin/r2-upload.sh
+
+# Force email for this run, overriding EMAIL_TO
+./bin/r2-upload.sh --email someone@example.com
+
+# Force email for this run, no ADDRESS — uses EMAIL_TO from .env
+./bin/r2-upload.sh --email
+```
+
+> ⚠️ If `-e/--email` is given but neither an address nor `EMAIL_TO` is configured, the script **errors out before doing any work** — so check your config first.
+
+### Email Body
+
+The body is plain-text and includes:
+
+- Operation (`upload` / `download`), status (`success` / `failure` / `dry-run`), exit code
+- Hostname, start/finish timestamps, duration
+- Key-value summary of the run (source, destination, bucket, key, dry-run flag, etc.)
+- **Full log buffer** for the run — every `[INFO]` / `[WARN]` / `[ERROR]` line captured during execution
+
+### Disabling Per-Run
+
+- `EMAIL_ON_SUCCESS=false` → no email on success
+- `EMAIL_ON_FAILURE=false` → no email on failure
+- `EMAIL_ENABLED=false` → no email at all (CLI `-e` still forces `true`)
 
 ---
 
