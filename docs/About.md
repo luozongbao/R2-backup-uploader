@@ -1,0 +1,1 @@
+Bash Script used to upload backup to R2 Service with .env.example to config each usage case differetnt cloudflare R2 account.
