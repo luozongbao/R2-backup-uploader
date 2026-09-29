@@ -282,3 +282,219 @@ r2::is_true() {
         *) return 1 ;;
     esac
 }
+
+# -----------------------------------------------------------------------------
+# Run summary / email notifications
+# -----------------------------------------------------------------------------
+# Per-run state captured in associative-like global variables so the email
+# helper at exit can summarise what happened.
+__R2_RUN_OPERATION="${__R2_RUN_OPERATION:-unknown}"   # upload | download
+__R2_RUN_STATUS="${__R2_RUN_STATUS:-unknown}"         # success | failure | dry-run
+__R2_RUN_EXIT_CODE="${__R2_RUN_EXIT_CODE:-0}"
+__R2_RUN_START_TS="${__R2_RUN_START_TS:-$(date +%s)}"
+__R2_RUN_DETAILS="${__R2_RUN_DETAILS:-}"             # free-form key=value;...
+__R2_RUN_LOG_BUFFER="${__R2_RUN_LOG_BUFFER:-}"       # accumulated log lines
+__R2_RUN_EMAIL_OVERRIDE="${__R2_RUN_EMAIL_OVERRIDE:-}" # set by -e/--email ADDRESS
+
+# r2::start_run <operation>
+# Resets per-run state. Call once at the top of each script.
+r2::start_run() {
+    __R2_RUN_OPERATION="$1"
+    __R2_RUN_STATUS="running"
+    __R2_RUN_EXIT_CODE=0
+    __R2_RUN_START_TS="$(date +%s)"
+    __R2_RUN_DETAILS=""
+    __R2_RUN_LOG_BUFFER=""
+}
+
+# r2::set_status <status> — record final status for the email summary.
+r2::set_status() {
+    __R2_RUN_STATUS="$1"
+}
+
+# r2::set_exit_code <n>
+r2::set_exit_code() {
+    __R2_RUN_EXIT_CODE="$1"
+}
+
+# r2::record <key>=<value> — append a key=value pair to the summary.
+r2::record() {
+    if [[ -n "$__R2_RUN_DETAILS" ]]; then
+        __R2_RUN_DETAILS+=$'\n'
+    fi
+    __R2_RUN_DETAILS+="$1"
+}
+
+# r2::format_duration <seconds> — human-readable "1h 2m 3s" / "4s".
+r2::format_duration() {
+    local total="$1"
+    local h=$((total / 3600))
+    local m=$(( (total % 3600) / 60 ))
+    local s=$((total % 60))
+    local out=""
+    (( h > 0 )) && out+="${h}h "
+    (( m > 0 )) && out+="${m}m "
+    out+="${s}s"
+    printf '%s' "$out"
+}
+
+# Internal: tee every log line into the run buffer as well as the configured
+# sink (stderr / LOG_FILE). We override r2::log via a wrapper.
+__r2_log_sink() {
+    local line="$1"
+    __R2_RUN_LOG_BUFFER+="${line}"$'\n'
+}
+
+# r2::tee_log <level> <message...>
+# Behaves like r2::log but also stores the line in the run buffer for the
+# email summary. Call this from scripts in addition to (or instead of)
+# r2::log when you want the line in the email body.
+r2::tee_log() {
+    r2::log "$@"
+    local line
+    line="$(date -u '+%Y-%m-%dT%H:%M:%SZ') [${1^^}] $*"
+    __r2_log_sink "$line"
+}
+
+# r2::resolve_email_recipients
+# Returns 0 and prints recipients if any are configured; returns 1 otherwise.
+# Resolution order:
+#   1. --email ADDRESS from CLI (stored in __R2_RUN_EMAIL_OVERRIDE)
+#   2. EMAIL_TO from .env (comma-separated supported)
+r2::resolve_email_recipients() {
+    local recipients=""
+    if [[ -n "$__R2_RUN_EMAIL_OVERRIDE" ]]; then
+        recipients="$__R2_RUN_EMAIL_OVERRIDE"
+    elif [[ -n "${EMAIL_TO:-}" ]]; then
+        recipients="$EMAIL_TO"
+    fi
+
+    if [[ -z "$recipients" ]]; then
+        return 1
+    fi
+
+    # Normalise whitespace + commas into spaces, then space-separated output.
+    recipients="${recipients//,/ }"
+    recipients="${recipients//  / }"
+    recipients="${recipients#"${recipients%%[![:space:]]*}"}"
+    recipients="${recipients%"${recipients##*[![:space:]]}"}"
+    printf '%s' "$recipients"
+    return 0
+}
+
+# r2::should_email
+# Returns 0 if we should send an email given the configured flags and current
+# run status. Honours EMAIL_ENABLED + EMAIL_ON_SUCCESS / EMAIL_ON_FAILURE.
+r2::should_email() {
+    r2::is_true "${EMAIL_ENABLED:-false}" || return 1
+
+    case "$__R2_RUN_STATUS" in
+        success)
+            r2::is_true "${EMAIL_ON_SUCCESS:-true}" || return 1
+            ;;
+        failure)
+            r2::is_true "${EMAIL_ON_FAILURE:-true}" || return 1
+            ;;
+        dry-run)
+            # Dry-runs never send email.
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# r2::build_email_body
+# Prints the plain-text email body.
+r2::build_email_body() {
+    local now duration
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    duration=$(($(date +%s) - __R2_RUN_START_TS))
+    local duration_str
+    duration_str="$(r2::format_duration "$duration")"
+
+    cat <<EOF
+R2 Backup Uploader — run report
+================================
+
+Operation : ${__R2_RUN_OPERATION}
+Status    : ${__R2_RUN_STATUS}
+Exit code : ${__R2_RUN_EXIT_CODE}
+Host      : $(hostname 2>/dev/null || echo unknown)
+Started   : $(date -u -d "@${__R2_RUN_START_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "${__R2_RUN_START_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${__R2_RUN_START_TS}")
+Finished  : ${now}
+Duration  : ${duration_str}
+
+Details
+-------
+${__R2_RUN_DETAILS}
+
+Full log
+--------
+${__R2_RUN_LOG_BUFFER}
+EOF
+}
+
+# r2::build_email_subject
+# Prints the email subject, based on EMAIL_SUBJECT_OK / EMAIL_SUBJECT_FAIL
+# with $(hostname) and $(date) expanded.
+r2::build_email_subject() {
+    local template
+    if [[ "$__R2_RUN_STATUS" == "success" ]]; then
+        template="${EMAIL_SUBJECT_OK:-[R2] ${__R2_RUN_OPERATION} OK: $(hostname)}"
+    else
+        template="${EMAIL_SUBJECT_FAIL:-[R2] ${__R2_RUN_OPERATION} FAILED: $(hostname)}"
+    fi
+    r2::expand_prefix "$template"
+}
+
+# r2::send_email
+# Sends the notification email using msmtp. Errors are logged but never cause
+# the script to fail (email is best-effort).
+r2::send_email() {
+    local recipients
+    if ! recipients="$(r2::resolve_email_recipients)"; then
+        r2::warn "Email notification requested but no recipients configured (use -e ADDRESS or set EMAIL_TO)"
+        return 0
+    fi
+
+    if ! r2::should_email; then
+        r2::debug "Email skipped (EMAIL_ENABLED or per-status flag disabled)"
+        return 0
+    fi
+
+    if ! command -v msmtp >/dev/null 2>&1; then
+        r2::error "msmtp not found on PATH; cannot send email notification"
+        return 0
+    fi
+
+    local subject body
+    subject="$(r2::build_email_subject)"
+    body="$(r2::build_email_body)"
+
+    # Build a temp file so we don't need to worry about quoting in -s/-a flags.
+    local tmp
+    tmp="$(mktemp)"
+    printf '%s\n' "$body" > "$tmp"
+
+    local rc=0
+    # shellcheck disable=SC2086
+    env \
+        EMAIL_ENABLED="$EMAIL_ENABLED" \
+        MSMTP_ACCOUNT="${MSMTP_ACCOUNT:-default}" \
+        msmtp --account "${MSMTP_ACCOUNT:-default}" $recipients <<EOF || rc=$?
+Subject: ${subject}
+From: ${MSMTP_ACCOUNT:-default}
+To: ${recipients// /, }
+Content-Type: text/plain; charset=UTF-8
+
+$(cat "$tmp")
+EOF
+    rm -f "$tmp"
+
+    if (( rc != 0 )); then
+        r2::error "msmtp exited with rc=${rc}; notification email not sent"
+    else
+        r2::info "Notification email sent to: ${recipients// /, }"
+    fi
+    return 0
+}
