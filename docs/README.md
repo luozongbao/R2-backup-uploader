@@ -27,10 +27,11 @@ R2 Backup Uploader is a lightweight Bash tool that automates **uploading and dow
 
 ## Features
 
-- ✅ **Upload** files or directories (auto-compressed as tar.gz) to R2
+- ✅ **Upload** files or directories (each file as a separate object) to R2
 - ✅ **Download** individual keys or sync entire prefixes back from R2
 - ✅ **Per-account configuration** via `.env` files
-- ✅ **Automatic compression** (tar.gz) for directory sources
+- ✅ **Auto-archive** verified uploads into a dated folder
+- ✅ **SHA-256 checksum verification** after every upload
 - ✅ **Dry-run mode** for safe testing
 - ✅ **Retry logic** with configurable attempts and delays
 - ✅ **Safety checks** (overwrite protection, confirmation prompts)
@@ -69,7 +70,6 @@ R2-backup-uploader/
 
 - **Bash** >= 4.0
 - **AWS CLI v2** (supports Cloudflare R2 via custom endpoints)
-- **tar** (for directory compression)
 - **msmtp** (optional — only required if you want email notifications; see [Email Notifications](#email-notifications))
 - **Standard Unix tools**: `date`, `hostname`, `sed`, `grep`
 
@@ -128,9 +128,10 @@ R2_MULTIPART_THRESHOLD="64MB"
 R2_MULTIPART_CHUNKSIZE="32MB"
 
 # ---- Source (upload only) ----
-SOURCE_PATH="/var/backups"
-SOURCE_COMPRESS="true"
-SOURCE_KEEP_LOCAL="false"
+SOURCE_PATH="/var/backups"            # file OR directory (each file uploaded as separate object)
+SOURCE_DELETE_AFTER="true"            # move uploaded files to archive folder after success
+SOURCE_ARCHIVE_DIR="/var/backups/.archive"  # required when SOURCE_DELETE_AFTER=true
+SOURCE_ARCHIVE_ORGANIZE="$(date)"     # subdir under archive; supports $(hostname), $(date)
 
 # ---- Download Behaviour ----
 DOWNLOAD_DEST="./downloads/"
@@ -171,9 +172,10 @@ LOG_FILE=""
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `SOURCE_PATH` | File or directory to upload | — | ✅ for upload |
-| `SOURCE_COMPRESS` | Compress directories with tar.gz | `true` | ❌ |
-| `SOURCE_KEEP_LOCAL` | Keep local files after upload | `false` | ❌ |
+| `SOURCE_PATH` | File or directory to upload (each regular file uploaded as a separate object) | — | ✅ for upload |
+| `SOURCE_DELETE_AFTER` | Move uploaded files to `SOURCE_ARCHIVE_DIR` after verified upload | `true` | ❌ |
+| `SOURCE_ARCHIVE_DIR` | Local archive directory (required when `SOURCE_DELETE_AFTER=true`) | — | conditional |
+| `SOURCE_ARCHIVE_ORGANIZE` | Subdir pattern under archive; supports `$(hostname)` and `$(date)` | `$(date)` | ❌ |
 
 **Download**
 
@@ -255,13 +257,32 @@ REQUIRE_CONFIRM=false DRY_RUN=false ./bin/r2-upload.sh --config /etc/r2/prod.env
 ./bin/r2-upload.sh --source /path/to/backup.tar.gz
 ```
 
-### Example 5: Upload a Directory (Auto-Compressed)
+### Example 5: Upload a Directory (Each File Separately)
 
 ```bash
 ./bin/r2-upload.sh --source /var/www/html
 ```
 
-The script will automatically create a tar.gz archive of the directory before uploading.
+Each regular file in the top level of `/var/www/html` is uploaded as its own R2 object. After successful upload (and checksum verification), files are moved into `SOURCE_ARCHIVE_DIR/$(date)/` so the next run only sees new/changed files.
+
+> The script does **not** recurse. Backups are expected to be a flat dump folder (e.g. `/var/backups/*.sql.gz`). If you need recursion, pre-stage them or use `find ... -exec cp {} staging/ \;`.
+
+---
+
+### Archive Pattern (Verified Upload → Move Aside)
+
+The default upload flow is designed to keep your backup folder clean while giving you a verifiable, auditable trail:
+
+1. **Discover** — every regular file in `SOURCE_PATH` (top-level only).
+2. **Check existing objects** — skip keys that already exist unless `R2_OVERWRITE=true`.
+3. **Upload** — `aws s3 cp` with retry, tagged `R2_STORAGE_CLASS`.
+4. **Verify** — compute local SHA-256, fetch remote object, compare.
+5. **Archive** — on verify-success and `SOURCE_DELETE_AFTER=true`, move the file to `SOURCE_ARCHIVE_DIR/<$(date) subdir>/`. Name collisions are resolved with a `-<timestamp>` suffix.
+6. **Email** — at the end of the run, send a summary (success / failure / dry-run) with counts and durations.
+
+This means the next cron run only sees *new* files in `SOURCE_PATH`, and you always have a local archive folder organised by date for forensics.
+
+**Disabling archive**: set `SOURCE_DELETE_AFTER=false` to keep files in place after upload. `SOURCE_ARCHIVE_DIR` then becomes optional and is ignored.
 
 ---
 
@@ -324,16 +345,16 @@ DRY_RUN=true REQUIRE_CONFIRM=false ./bin/r2-download.sh --config .env
 
 > ⚠️ `--delete-remote` is destructive. Run with `--dry-run` first to verify which objects would be removed.
 
-### Restoring a Compressed Directory
+### Restoring a Directory
 
-If the upload was a tar.gz archive (from `SOURCE_COMPRESS=true`), restore with:
+If you uploaded a directory whose contents are tar.gz archives, restore one with:
 
 ```bash
-# Download
-./bin/r2-download.sh --config .env --key backups/web01/site-2026-09-29.tar.gz
+# Download a single backup
+./bin/r2-download.sh --config .env --key backups/web01/db-2026-09-29.sql.gz
 
 # Extract
-tar -xzf ./downloads/site-2026-09-29.tar.gz -C /var/www/
+tar -xzf ./downloads/db-2026-09-29.sql.gz -C /var/backups/
 ```
 
 ---
@@ -430,7 +451,7 @@ The body is plain-text and includes:
 
 - **Bash** >= 4.0
 - **AWS CLI v2** (install instructions above)
-- **tar** (for directory compression)
+- **tar** (optional; only used in restoration examples)
 - **ShellCheck** (optional, for linting)
 
 ### Install ShellCheck
@@ -477,10 +498,9 @@ Future enhancements planned for upcoming versions:
 
 - 🔄 **Multiple account profiles** — switch between R2 accounts easily
 - 🔐 **Pre-upload encryption** — encrypt backups with age/gpg before upload
-- 🧪 **Automated tests** — GitHub Actions workflow for CI lint
+- 🧪 **Automated tests** — GitHub Actions workflow for real R2 round-trip
 - 📊 **Upload/download statistics** — track history and metrics
-- 🗜️ **Advanced compression options** — support for zstd, bzip2, etc.
-- 🔁 **End-to-end verify** — checksum compare after download
+- 📂 **Recursive directory uploads** — walk subdirectories on demand
 
 ---
 

@@ -102,9 +102,14 @@ if [[ "$DELETE_REMOTE_CLI" == "true" ]]; then
 fi
 
 r2::require_cmd aws || exit 1
-r2::require_vars R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET DOWNLOAD_DEST || exit 1
+r2::require_vars R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET || exit 1
 
 DEST="${DEST_OVERRIDE:-$DOWNLOAD_DEST}"
+DEST="$(r2::abspath "$DEST")"
+if [[ -z "$DEST" ]]; then
+    r2::error "DOWNLOAD_DEST is empty (set in .env or pass --dest)"
+    exit 2
+fi
 
 # Trap for cleanup + email summary.
 cleanup() {

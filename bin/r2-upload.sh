@@ -96,7 +96,7 @@ if [[ "$DRY_RUN_CLI" == "true" ]]; then
     DRY_RUN=true
 fi
 
-r2::require_cmd aws tar || exit 1
+r2::require_cmd aws || exit 1
 r2::require_vars R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ENDPOINT R2_BUCKET || exit 1
 
 # Resolve source path.
@@ -105,29 +105,34 @@ if [[ -z "${SRC:-}" ]]; then
     r2::error "SOURCE_PATH is not set (use --source or define in .env)"
     exit 1
 fi
+# Expand a leading "~" to $HOME (the .env loader can't do this because
+# quoted values round-trip through the shell unchanged).
+SRC="$(r2::abspath "$SRC")"
 
 # -----------------------------------------------------------------------------
 # Prepare source
 # -----------------------------------------------------------------------------
-TEMP_TARBALL=""
+# Returns the list of files to upload, one per line. For a single file, prints
+# that file. For a directory, prints every regular file inside (non-recursive
+# by default; we don't try to be clever about recursion since backups are
+# usually a flat dump folder).
 prepare_source() {
     if [[ -f "$SRC" ]]; then
-        echo "$SRC"
+        printf '%s\n' "$SRC"
         return 0
     fi
 
     if [[ -d "$SRC" ]]; then
-        if ! r2::is_true "$SOURCE_COMPRESS"; then
-            r2::error "SOURCE_PATH is a directory but SOURCE_COMPRESS=false; set SOURCE_COMPRESS=true or pass a file"
+        local f
+        local count=0
+        while IFS= read -r f; do
+            printf '%s\n' "$f"
+            count=$((count + 1))
+        done < <(find "$SRC" -mindepth 1 -maxdepth 1 -type f)
+        if (( count == 0 )); then
+            r2::error "SOURCE_PATH is a directory but contains no regular files: $SRC"
             return 1
         fi
-        local base name
-        base="$(basename "$SRC")"
-        name="${base}-$(date -u '+%Y%m%dT%H%M%SZ').tar.gz"
-        TEMP_TARBALL="$(mktemp -t "${name}.XXXXXX")"
-        r2::info "Compressing directory $SRC -> $TEMP_TARBALL"
-        tar -czf "$TEMP_TARBALL" -C "$(dirname "$SRC")" "$base"
-        echo "$TEMP_TARBALL"
         return 0
     fi
 
@@ -154,76 +159,121 @@ cleanup() {
     # Send notification email (best-effort; never fails the script).
     r2::send_email || true
 
-    if [[ -n "$TEMP_TARBALL" && -f "$TEMP_TARBALL" ]]; then
-        rm -f "$TEMP_TARBALL"
-        r2::debug "Removed temp tarball $TEMP_TARBALL"
-    fi
     exit $rc
 }
 trap cleanup EXIT INT TERM
 
-UPLOAD_FILE="$(prepare_source)" || exit 1
-FILENAME="$(basename "$UPLOAD_FILE")"
+# Resolve the list of files to upload.
+mapfile -t SOURCE_FILES < <(prepare_source) || exit 1
 
 PREFIX="$(r2::expand_prefix "$R2_PATH_PREFIX")"
-# Strip trailing slash for clean join.
 PREFIX="${PREFIX%/}"
-KEY="${PREFIX}/${FILENAME}"
 
-r2::record "source=${UPLOAD_FILE}"
-r2::record "destination=s3://${R2_BUCKET}/${KEY}"
+# Validate archive configuration up-front so we fail before doing work.
+if r2::is_true "$SOURCE_DELETE_AFTER" && [[ -z "${SOURCE_ARCHIVE_DIR:-}" ]]; then
+    r2::error "SOURCE_DELETE_AFTER=true but SOURCE_ARCHIVE_DIR is empty"
+    exit 2
+fi
+
+r2::record "source_count=${#SOURCE_FILES[@]}"
 r2::record "bucket=${R2_BUCKET}"
-r2::record "key=${KEY}"
+r2::record "prefix=${PREFIX}"
 r2::record "storage_class=${R2_STORAGE_CLASS}"
 r2::record "dry_run=${DRY_RUN}"
+r2::record "delete_after=${SOURCE_DELETE_AFTER}"
+r2::record "archive_dir=${SOURCE_ARCHIVE_DIR:-}"
 
 # -----------------------------------------------------------------------------
-# Pre-flight checks
+# Pre-flight: dry-run
 # -----------------------------------------------------------------------------
 if r2::is_true "$DRY_RUN"; then
-    r2::tee_log info "[DRY-RUN] Would upload: $UPLOAD_FILE"
-    r2::tee_log info "[DRY-RUN]       to:   s3://${R2_BUCKET}/${KEY}"
-    r2::tee_log info "[DRY-RUN]       storage-class: $R2_STORAGE_CLASS"
+    dry_run_target_dir="$(r2::archive_target_dir 2>/dev/null || true)"
+    r2::tee_log info "[DRY-RUN] Would upload ${#SOURCE_FILES[@]} file(s) from: $SRC"
+    for f in "${SOURCE_FILES[@]}"; do
+        key="${PREFIX}/$(basename "$f")"
+        r2::tee_log info "[DRY-RUN]   s3://${R2_BUCKET}/${key}"
+    done
+    if r2::is_true "$SOURCE_DELETE_AFTER"; then
+        r2::tee_log info "[DRY-RUN] After upload, would move files to: ${dry_run_target_dir:-<no archive dir>}"
+    fi
     exit 0
 fi
 
-# Check for existing key unless overwrite is enabled.
-if ! r2::is_true "$R2_OVERWRITE"; then
-    if r2::aws s3api head-object --bucket "$R2_BUCKET" --key "$KEY" >/dev/null 2>&1; then
-        r2::tee_log warn "Object already exists and R2_OVERWRITE=false: s3://${R2_BUCKET}/${KEY}"
-        exit 0
-    fi
-fi
-
 # Interactive confirmation.
-r2::confirm "Upload $UPLOAD_FILE to s3://${R2_BUCKET}/${KEY}?" || {
+r2::confirm "Upload ${#SOURCE_FILES[@]} file(s) from $SRC to s3://${R2_BUCKET}/${PREFIX}/?" || {
     r2::tee_log warn "Aborted by user"
     exit 1
 }
 
 # -----------------------------------------------------------------------------
-# Upload
+# Upload loop
 # -----------------------------------------------------------------------------
-r2::tee_log info "Uploading $UPLOAD_FILE -> s3://${R2_BUCKET}/${KEY}"
-if ! r2::retry "$RETRY_COUNT" "$RETRY_DELAY" \
-    r2::aws s3 cp "$UPLOAD_FILE" "s3://${R2_BUCKET}/${KEY}" \
-        --storage-class "$R2_STORAGE_CLASS"; then
-    r2::tee_log error "Upload failed: s3://${R2_BUCKET}/${KEY}"
-    exit 1
-fi
+declare -a UPLOADED_KEYS=()
+declare -a UPLOADED_LOCALS=()
+declare -a SKIPPED_KEYS=()
 
-r2::tee_log info "Upload complete: s3://${R2_BUCKET}/${KEY}"
+f=""
+key=""
+verify_rc=0
+for f in "${SOURCE_FILES[@]}"; do
+    key="${PREFIX}/$(basename "$f")"
 
-# Optionally remove local source.
-if [[ -n "${SOURCE_OVERRIDE:-}" ]] || r2::is_true "$SOURCE_KEEP_LOCAL"; then
-    :
-else
-    # Only auto-remove if source was the configured path (avoid clobbering
-    # user-supplied --source).
-    if [[ -z "${SOURCE_OVERRIDE:-}" && "$UPLOAD_FILE" != "$SRC" ]]; then
-        # Uploaded a temp tarball; already cleaned up by trap.
-        :
+    # Skip if exists and overwrite disabled.
+    if ! r2::is_true "$R2_OVERWRITE"; then
+        if r2::aws s3api head-object --bucket "$R2_BUCKET" --key "$key" >/dev/null 2>&1; then
+            r2::tee_log info "Skip (exists, overwrite=false): s3://${R2_BUCKET}/${key}"
+            SKIPPED_KEYS+=("$key")
+            continue
+        fi
     fi
+
+    r2::tee_log info "Uploading $f -> s3://${R2_BUCKET}/${key}"
+    if ! r2::retry "$RETRY_COUNT" "$RETRY_DELAY" \
+        r2::aws s3 cp "$f" "s3://${R2_BUCKET}/${key}" \
+            --storage-class "$R2_STORAGE_CLASS" \
+            --checksum-algorithm SHA256; then
+        r2::tee_log error "Upload failed: s3://${R2_BUCKET}/${key}"
+        exit 1
+    fi
+
+    # Track uploaded files now (before verify) so a failed verify of one file
+    # doesn't strand earlier successes in the source folder. The verify result
+    # only controls whether to KEEP the file tracked for archiving or not.
+    UPLOADED_KEYS+=("$key")
+    UPLOADED_LOCALS+=("$f")
+
+    # Verify with checksum. verify_rc: 0=match, 1=mismatch, 2=inconclusive.
+    verify_rc=0
+    if ! r2::verify_checksum "$f" "$R2_BUCKET" "$key"; then
+        verify_rc=$?
+    fi
+    if (( verify_rc == 2 )); then
+        # Could not compute — don't archive, don't fail (file stays in place).
+        r2::warn "Checksum verification inconclusive for $f; not archiving"
+        # Remove from upload lists so archive step leaves it alone.
+        unset 'UPLOADED_KEYS[${#UPLOADED_KEYS[@]}-1]'
+        unset 'UPLOADED_LOCALS[${#UPLOADED_LOCALS[@]}-1]'
+    elif (( verify_rc == 1 )); then
+        r2::error "Checksum verification FAILED for $f; leaving local file in place"
+        unset 'UPLOADED_KEYS[${#UPLOADED_KEYS[@]}-1]'
+        unset 'UPLOADED_LOCALS[${#UPLOADED_LOCALS[@]}-1]'
+        exit 1
+    fi
+done
+
+r2::tee_log info "Uploaded ${#UPLOADED_KEYS[@]} file(s); skipped ${#SKIPPED_KEYS[@]}"
+
+# -----------------------------------------------------------------------------
+# Archive (move to archive folder)
+# -----------------------------------------------------------------------------
+if r2::is_true "$SOURCE_DELETE_AFTER" && (( ${#UPLOADED_LOCALS[@]} > 0 )); then
+    for f in "${UPLOADED_LOCALS[@]}"; do
+        if ! r2::move_to_archive "$f"; then
+            r2::error "Failed to archive $f; leaving local file in place"
+            exit 1
+        fi
+    done
 fi
 
 exit 0
+

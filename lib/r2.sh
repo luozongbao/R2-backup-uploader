@@ -126,6 +126,12 @@ r2::load_env() {
             if [[ "$val" =~ ^\"(.*)\"$ ]] || [[ "$val" =~ ^\'(.*)\'$ ]]; then
                 val="${BASH_REMATCH[1]}"
             fi
+            # Expand a leading "~" or "~/" to the current user's home dir
+            # (tilde is NOT expanded inside quoted strings, which is how .env
+            # files are normally written).
+            case "$val" in
+                "~"|"~/"*) val="$HOME${val#"~"}" ;;
+            esac
             # Only assign if not already exported.
             if [[ -z "${!key:-}" ]]; then
                 printf -v "$key" '%s' "$val"
@@ -142,8 +148,9 @@ r2::load_env() {
     : "${R2_MULTIPART_THRESHOLD:=64MB}"
     : "${R2_MULTIPART_CHUNKSIZE:=32MB}"
 
-    : "${SOURCE_COMPRESS:=true}"
-    : "${SOURCE_KEEP_LOCAL:=false}"
+    : "${SOURCE_DELETE_AFTER:=true}"
+    : "${SOURCE_ARCHIVE_DIR:=}"
+    : "${SOURCE_ARCHIVE_ORGANIZE:=$(date)}"
 
     : "${DOWNLOAD_DEST:=./downloads/}"
     : "${DOWNLOAD_OVERWRITE:=false}"
@@ -156,6 +163,13 @@ r2::load_env() {
     : "${RETRY_DELAY:=5}"
     : "${LOG_LEVEL:=info}"
     : "${LOG_FILE:=}"
+
+    # Expand "~" in LOG_FILE so cron / non-interactive runs always find it.
+    if [[ -n "$LOG_FILE" ]]; then
+        case "$LOG_FILE" in
+            "~"|"~/"*) LOG_FILE="$HOME${LOG_FILE#"~"}" ;;
+        esac
+    fi
 
     r2::debug "Loaded env from $env_file"
 }
@@ -206,7 +220,12 @@ r2::aws() {
         AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
         AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
         AWS_DEFAULT_REGION="$R2_REGION" \
-        aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" "$@"
+        AWS_EC2_METADATA_DISABLED=true \
+        AWS_CONFIG_FILE=/dev/null \
+        aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" \
+            --cli-connect-timeout "${AWS_CLI_CONNECT_TIMEOUT:-30}" \
+            --cli-read-timeout "${AWS_CLI_READ_TIMEOUT:-120}" \
+            "$@"
 }
 
 # -----------------------------------------------------------------------------
@@ -270,6 +289,20 @@ r2::expand_prefix() {
     template="${template//\$(hostname)/$hn}"
     template="${template//\$(date)/$dt}"
     printf '%s' "$template"
+}
+
+# r2::abspath <path>
+# Expands a leading "~" or "~/" to $HOME. Leaves absolute paths and relative
+# paths (other than those starting with ~) untouched. This is the
+# authoritative path normaliser — the env loader uses it for any variable
+# that points at a filesystem path so users can write `~/backups` in .env.
+r2::abspath() {
+    local p="$1"
+    case "$p" in
+        "~")       printf '%s' "$HOME" ;;
+        "~/"*)     printf '%s/%s' "$HOME" "${p#"~/"}" ;;
+        *)         printf '%s' "$p" ;;
+    esac
 }
 
 # -----------------------------------------------------------------------------
@@ -476,14 +509,18 @@ r2::send_email() {
     tmp="$(mktemp)"
     printf '%s\n' "$body" > "$tmp"
 
-    local rc=0
+    local rc=0 from_header=""
+    if [[ -n "${EMAIL_FROM:-}" ]]; then
+        from_header="From: ${EMAIL_FROM}"
+    fi
+
     # shellcheck disable=SC2086
     env \
         EMAIL_ENABLED="$EMAIL_ENABLED" \
         MSMTP_ACCOUNT="${MSMTP_ACCOUNT:-default}" \
         msmtp --account "${MSMTP_ACCOUNT:-default}" $recipients <<EOF || rc=$?
 Subject: ${subject}
-From: ${MSMTP_ACCOUNT:-default}
+${from_header}
 To: ${recipients// /, }
 Content-Type: text/plain; charset=UTF-8
 
@@ -497,4 +534,175 @@ EOF
         r2::info "Notification email sent to: ${recipients// /, }"
     fi
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# Checksum helpers
+# -----------------------------------------------------------------------------
+# r2::local_sha256 <path> — prints SHA-256 of a local file. Returns 1 if
+# the file does not exist or is unreadable.
+r2::local_sha256() {
+    local path="$1"
+    if [[ ! -f "$path" ]]; then
+        return 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$path" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+# r2::remote_sha256 <bucket> <key>
+# Returns the SHA-256 of an R2 object as a hex string. Tries (in order):
+#   1. s3api get-object-attributes --object-attributes ChecksumSHA256
+#      (server-side stored checksum, no download needed). R2 populates this
+#      automatically for any object uploaded with --checksum-algorithm
+#      SHA256. For objects uploaded without that flag the field is empty
+#      and we fall through to option 2.
+#   2. s3api get-object-attributes --object-attributes ETag, when the object
+#      was uploaded in a single PUT. In that case ETag IS the MD5 of the
+#      plaintext, and we can convert MD5 to a checksum-equivalent. We still
+#      can't compare SHA-256 to MD5, so this branch only succeeds when the
+#      server reports a real SHA256 checksum.
+#   3. Last resort: download via `aws s3 cp` and hash locally.
+r2::remote_sha256() {
+    local bucket="$1" key="$2"
+
+    local attrs rc=0
+    if attrs="$(env \
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+        AWS_DEFAULT_REGION="$R2_REGION" \
+        aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" \
+        s3api get-object-attributes \
+            --bucket "$bucket" --key "$key" \
+            --object-attributes ChecksumSHA256 \
+            --output json 2>/dev/null)"; then
+        local hex
+        # Response is {"ChecksumSHA256":"<base64>"}
+        hex="$(printf '%s' "$attrs" | grep -o '"ChecksumSHA256":"[^"]*"' \
+                | sed 's/.*"ChecksumSHA256":"//;s/"$//' \
+                | base64 -d 2>/dev/null | xxd -p -c 256 2>/dev/null \
+                | tr -d '\n')"
+        if [[ -n "$hex" && ${#hex} -eq 64 ]]; then
+            printf '%s' "$hex"
+            return 0
+        fi
+    fi
+
+    # Fallback: download + hash.
+    local tmp
+    tmp="$(mktemp)"
+    if ! env \
+        AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+        AWS_DEFAULT_REGION="$R2_REGION" \
+        aws --endpoint-url "$R2_ENDPOINT" --region "$R2_REGION" \
+        s3 cp "s3://${bucket}/${key}" "$tmp" --quiet 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    r2::local_sha256 "$tmp"
+    rc=$?
+    rm -f "$tmp"
+    return $rc
+}
+
+# r2::verify_checksum <local_path> <bucket> <key>
+# Compares local SHA-256 against the remote object. Returns 0 on match,
+# 1 on mismatch, 2 if either checksum could not be computed.
+r2::verify_checksum() {
+    local local_path="$1" bucket="$2" key="$3"
+
+    local local_sum remote_sum
+    if ! local_sum="$(r2::local_sha256 "$local_path")"; then
+        r2::warn "Could not compute local checksum for $local_path"
+        return 2
+    fi
+    r2::debug "Local  sha256($local_path) = $local_sum"
+
+    if ! remote_sum="$(r2::remote_sha256 "$bucket" "$key")"; then
+        r2::warn "Could not compute remote checksum for s3://${bucket}/${key}"
+        return 2
+    fi
+    r2::debug "Remote sha256($bucket/$key) = $remote_sum"
+
+    if [[ "$local_sum" == "$remote_sum" ]]; then
+        r2::info "Checksum verified: $local_sum"
+        return 0
+    fi
+    r2::error "Checksum mismatch: local=$local_sum remote=$remote_sum"
+    return 1
+}
+
+# -----------------------------------------------------------------------------
+# Archive helpers (post-upload move)
+# -----------------------------------------------------------------------------
+# r2::archive_target_dir
+# Prints the absolute target directory for this run's archive.
+# Returns 1 if archiving is not configured (SOURCE_ARCHIVE_DIR empty).
+r2::archive_target_dir() {
+    if [[ -z "${SOURCE_ARCHIVE_DIR:-}" ]]; then
+        return 1
+    fi
+    local base
+    base="$(r2::abspath "${SOURCE_ARCHIVE_DIR%/}")"
+    local sub
+    sub="$(r2::expand_prefix "${SOURCE_ARCHIVE_ORGANIZE:-$(date)}")"
+    sub="${sub#/}"
+    sub="${sub%/}"
+    if [[ -n "$sub" ]]; then
+        printf '%s/%s' "$base" "$sub"
+    else
+        printf '%s' "$base"
+    fi
+}
+
+# r2::move_to_archive <source-path>
+# Moves a local file (or directory) into the configured archive folder.
+# Creates the destination if missing. Returns 0 on success.
+r2::move_to_archive() {
+    local src="$1"
+    local dest_dir
+    if ! dest_dir="$(r2::archive_target_dir)"; then
+        r2::error "SOURCE_DELETE_AFTER=true but SOURCE_ARCHIVE_DIR is empty"
+        return 2
+    fi
+
+    if ! mkdir -p "$dest_dir"; then
+        r2::error "Failed to create archive directory: $dest_dir"
+        return 1
+    fi
+
+    local base
+    base="$(basename "$src")"
+    local dest="$dest_dir/$base"
+
+    # Avoid silent overwrite if a same-named file already exists. Walk a
+    # counter suffix to handle sub-second collisions in batch uploads.
+    if [[ -e "$dest" ]]; then
+        local ext="" name_no_ext="$base"
+        if [[ "$base" == *.* ]]; then
+            ext=".${base##*.}"
+            name_no_ext="${base%.*}"
+        fi
+        local stamp candidate n=1
+        stamp="$(date '+%Y%m%dT%H%M%S')"
+        candidate="${name_no_ext}-${stamp}${ext}"
+        while [[ -e "$dest_dir/$candidate" ]]; do
+            n=$((n + 1))
+            candidate="${name_no_ext}-${stamp}-${n}${ext}"
+        done
+        r2::warn "Archive target exists, renaming: $base -> $candidate"
+        dest="$dest_dir/$candidate"
+    fi
+
+    if ! mv "$src" "$dest"; then
+        r2::error "Failed to move $src -> $dest"
+        return 1
+    fi
+    r2::info "Archived: $src -> $dest"
 }

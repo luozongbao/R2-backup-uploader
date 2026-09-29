@@ -32,7 +32,7 @@ $EDITOR .env   # fill in your R2 credentials
 
 ## What You Get
 
-- `bin/r2-upload.sh` — uploads a file or directory (auto-tar.gz)
+- `bin/r2-upload.sh` — uploads a file or directory (each file as a separate object; archives locally after success)
 - `bin/r2-download.sh` — downloads by key or syncs a prefix
 - `lib/r2.sh` — shared helpers (env loading, logging, retries, AWS CLI wrapper)
 - `examples/.env.example` — configuration template
