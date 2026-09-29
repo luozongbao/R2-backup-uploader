@@ -64,7 +64,11 @@ done
 # -----------------------------------------------------------------------------
 r2::start_run upload
 
-# -e/--email handling. Precedence:
+# Load .env first so EMAIL_TO is available for -e validation.
+r2::load_env "$CONFIG_FILE" || exit 1
+
+# -e/--email handling (post-load so EMAIL_TO is populated).
+# Precedence:
 #   - if CLI flag was passed AND a value was given, use that (overrides EMAIL_TO)
 #   - if CLI flag was passed without a value, force EMAIL_ENABLED=true (use EMAIL_TO)
 #   - if CLI flag absent, leave EMAIL_ENABLED as-is from .env
@@ -77,17 +81,6 @@ if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
     if [[ -z "$EMAIL_VALUE" && -z "${EMAIL_TO:-}" ]]; then
         echo "Error: -e/--email requested but no EMAIL_TO set in .env and no ADDRESS given" >&2
         exit 2
-    fi
-fi
-
-r2::load_env "$CONFIG_FILE" || exit 1
-
-# Re-apply email override after .env load (in case it overrode it — though our
-# new parser preserves caller env, this is belt-and-braces).
-if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
-    EMAIL_ENABLED=true
-    if [[ -n "$EMAIL_VALUE" ]]; then
-        __R2_RUN_EMAIL_OVERRIDE="$EMAIL_VALUE"
     fi
 fi
 
@@ -251,12 +244,12 @@ for f in "${SOURCE_FILES[@]}"; do
         # Could not compute — don't archive, don't fail (file stays in place).
         r2::warn "Checksum verification inconclusive for $f; not archiving"
         # Remove from upload lists so archive step leaves it alone.
-        unset 'UPLOADED_KEYS[${#UPLOADED_KEYS[@]}-1]'
-        unset 'UPLOADED_LOCALS[${#UPLOADED_LOCALS[@]}-1]'
+        unset "UPLOADED_KEYS[$((${#UPLOADED_KEYS[@]}-1))]"
+        unset "UPLOADED_LOCALS[$((${#UPLOADED_LOCALS[@]}-1))]"
     elif (( verify_rc == 1 )); then
         r2::error "Checksum verification FAILED for $f; leaving local file in place"
-        unset 'UPLOADED_KEYS[${#UPLOADED_KEYS[@]}-1]'
-        unset 'UPLOADED_LOCALS[${#UPLOADED_LOCALS[@]}-1]'
+        unset "UPLOADED_KEYS[$((${#UPLOADED_KEYS[@]}-1))]"
+        unset "UPLOADED_LOCALS[$((${#UPLOADED_LOCALS[@]}-1))]"
         exit 1
     fi
 done

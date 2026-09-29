@@ -371,6 +371,15 @@ r2::format_duration() {
     printf '%s' "$out"
 }
 
+# r2::format_ts <epoch> — ISO-8601 UTC timestamp. Cross-platform
+# (works on GNU date and BSD date / macOS).
+r2::format_ts() {
+    local epoch="$1"
+    date -u -d "@${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || date -u -r "${epoch}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+        || printf '%s' "${epoch}"
+}
+
 # Internal: tee every log line into the run buffer as well as the configured
 # sink (stderr / LOG_FILE). We override r2::log via a wrapper.
 __r2_log_sink() {
@@ -453,7 +462,7 @@ Operation : ${__R2_RUN_OPERATION}
 Status    : ${__R2_RUN_STATUS}
 Exit code : ${__R2_RUN_EXIT_CODE}
 Host      : $(hostname 2>/dev/null || echo unknown)
-Started   : $(date -u -d "@${__R2_RUN_START_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -r "${__R2_RUN_START_TS}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo "${__R2_RUN_START_TS}")
+Started   : $(r2::format_ts "$__R2_RUN_START_TS")
 Finished  : ${now}
 Duration  : ${duration_str}
 
@@ -515,10 +524,7 @@ r2::send_email() {
     fi
 
     # shellcheck disable=SC2086
-    env \
-        EMAIL_ENABLED="$EMAIL_ENABLED" \
-        MSMTP_ACCOUNT="${MSMTP_ACCOUNT:-default}" \
-        msmtp --account "${MSMTP_ACCOUNT:-default}" $recipients <<EOF || rc=$?
+    msmtp --account "${MSMTP_ACCOUNT:-default}" $recipients <<EOF || rc=$?
 Subject: ${subject}
 ${from_header}
 To: ${recipients// /, }
