@@ -148,7 +148,7 @@ r2::load_env() {
     : "${R2_MULTIPART_THRESHOLD:=64MB}"
     : "${R2_MULTIPART_CHUNKSIZE:=32MB}"
 
-    : "${SOURCE_DELETE_AFTER:=true}"
+    : "${ARCHIVE_AFTER_UPLOAD:=true}"
     : "${SOURCE_ARCHIVE_DIR:=}"
     : "${SOURCE_ARCHIVE_ORGANIZE:=$(date)}"
 
@@ -674,7 +674,7 @@ r2::move_to_archive() {
     local src="$1"
     local dest_dir
     if ! dest_dir="$(r2::archive_target_dir)"; then
-        r2::error "SOURCE_DELETE_AFTER=true but SOURCE_ARCHIVE_DIR is empty"
+        r2::error "ARCHIVE_AFTER_UPLOAD=true but SOURCE_ARCHIVE_DIR is empty"
         return 2
     fi
 

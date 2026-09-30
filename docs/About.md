@@ -73,7 +73,7 @@ The default flow **moves** successfully-uploaded files into
 - You always have a local copy of everything you uploaded, organised by date.
 - The next cron run only iterates over new files, so it stays fast.
 
-Set `SOURCE_DELETE_AFTER=false` if you want to keep files in place.
+Set `ARCHIVE_AFTER_UPLOAD=false` if you want to keep files in place.
 
 ### 4. Verify, then archive
 

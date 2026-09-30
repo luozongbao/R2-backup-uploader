@@ -163,8 +163,8 @@ PREFIX="$(r2::expand_prefix "$R2_PATH_PREFIX")"
 PREFIX="${PREFIX%/}"
 
 # Validate archive configuration up-front so we fail before doing work.
-if r2::is_true "$SOURCE_DELETE_AFTER" && [[ -z "${SOURCE_ARCHIVE_DIR:-}" ]]; then
-    r2::error "SOURCE_DELETE_AFTER=true but SOURCE_ARCHIVE_DIR is empty"
+if r2::is_true "$ARCHIVE_AFTER_UPLOAD" && [[ -z "${SOURCE_ARCHIVE_DIR:-}" ]]; then
+    r2::error "ARCHIVE_AFTER_UPLOAD=true but SOURCE_ARCHIVE_DIR is empty"
     exit 2
 fi
 
@@ -173,7 +173,7 @@ r2::record "bucket=${R2_BUCKET}"
 r2::record "prefix=${PREFIX}"
 r2::record "storage_class=${R2_STORAGE_CLASS}"
 r2::record "dry_run=${DRY_RUN}"
-r2::record "delete_after=${SOURCE_DELETE_AFTER}"
+r2::record "archive_after=${ARCHIVE_AFTER_UPLOAD}"
 r2::record "archive_dir=${SOURCE_ARCHIVE_DIR:-}"
 
 # -----------------------------------------------------------------------------
@@ -186,7 +186,7 @@ if r2::is_true "$DRY_RUN"; then
         key="${PREFIX}/$(basename "$f")"
         r2::tee_log info "[DRY-RUN]   s3://${R2_BUCKET}/${key}"
     done
-    if r2::is_true "$SOURCE_DELETE_AFTER"; then
+    if r2::is_true "$ARCHIVE_AFTER_UPLOAD"; then
         r2::tee_log info "[DRY-RUN] After upload, would move files to: ${dry_run_target_dir:-<no archive dir>}"
     fi
     exit 0
@@ -259,7 +259,7 @@ r2::tee_log info "Uploaded ${#UPLOADED_KEYS[@]} file(s); skipped ${#SKIPPED_KEYS
 # -----------------------------------------------------------------------------
 # Archive (move to archive folder)
 # -----------------------------------------------------------------------------
-if r2::is_true "$SOURCE_DELETE_AFTER" && (( ${#UPLOADED_LOCALS[@]} > 0 )); then
+if r2::is_true "$ARCHIVE_AFTER_UPLOAD" && (( ${#UPLOADED_LOCALS[@]} > 0 )); then
     for f in "${UPLOADED_LOCALS[@]}"; do
         if ! r2::move_to_archive "$f"; then
             r2::error "Failed to archive $f; leaving local file in place"

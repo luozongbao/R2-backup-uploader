@@ -130,8 +130,8 @@ R2_MULTIPART_CHUNKSIZE="32MB"
 
 # ---- Source (upload only) ----
 SOURCE_PATH="/var/backups"            # file OR directory (each file uploaded as separate object)
-SOURCE_DELETE_AFTER="true"            # move uploaded files to archive folder after success
-SOURCE_ARCHIVE_DIR="/var/backups/.archive"  # required when SOURCE_DELETE_AFTER=true
+ARCHIVE_AFTER_UPLOAD="true"          # move uploaded files to archive folder after success
+SOURCE_ARCHIVE_DIR="/var/backups/.archive"  # required when ARCHIVE_AFTER_UPLOAD=true
 SOURCE_ARCHIVE_ORGANIZE="$(date)"     # subdir under archive; supports $(hostname), $(date)
 
 # ---- Download Behaviour ----
@@ -174,8 +174,8 @@ LOG_FILE=""
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `SOURCE_PATH` | File or directory to upload (each regular file uploaded as a separate object) | — | ✅ for upload |
-| `SOURCE_DELETE_AFTER` | Move uploaded files to `SOURCE_ARCHIVE_DIR` after verified upload | `true` | ❌ |
-| `SOURCE_ARCHIVE_DIR` | Local archive directory (required when `SOURCE_DELETE_AFTER=true`) | — | conditional |
+| `ARCHIVE_AFTER_UPLOAD` | Move uploaded files to `SOURCE_ARCHIVE_DIR` after verified upload | `true` | ❌ |
+| `SOURCE_ARCHIVE_DIR` | Local archive directory (required when `ARCHIVE_AFTER_UPLOAD=true`) | — | conditional |
 | `SOURCE_ARCHIVE_ORGANIZE` | Subdir pattern under archive; supports `$(hostname)` and `$(date)` | `$(date)` | ❌ |
 
 **Download**
@@ -278,12 +278,12 @@ The default upload flow is designed to keep your backup folder clean while givin
 2. **Check existing objects** — skip keys that already exist unless `R2_OVERWRITE=true`.
 3. **Upload** — `aws s3 cp` with retry, tagged `R2_STORAGE_CLASS`.
 4. **Verify** — compute local SHA-256, fetch remote object, compare.
-5. **Archive** — on verify-success and `SOURCE_DELETE_AFTER=true`, move the file to `SOURCE_ARCHIVE_DIR/<$(date) subdir>/`. Name collisions are resolved with a `-<timestamp>` suffix.
+5. **Archive** — on verify-success and `ARCHIVE_AFTER_UPLOAD=true`, move the file to `SOURCE_ARCHIVE_DIR/<$(date) subdir>/`. Name collisions are resolved with a `-<timestamp>` suffix.
 6. **Email** — at the end of the run, send a summary (success / failure / dry-run) with counts and durations.
 
 This means the next cron run only sees *new* files in `SOURCE_PATH`, and you always have a local archive folder organised by date for forensics.
 
-**Disabling archive**: set `SOURCE_DELETE_AFTER=false` to keep files in place after upload. `SOURCE_ARCHIVE_DIR` then becomes optional and is ignored.
+**Disabling archive**: set `ARCHIVE_AFTER_UPLOAD=false` to keep files in place after upload. `SOURCE_ARCHIVE_DIR` then becomes optional and is ignored.
 
 ---
 
