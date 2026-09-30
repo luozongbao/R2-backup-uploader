@@ -13,7 +13,10 @@ MAILTO=ops@example.com
 # Daily backup of /var/backups at 02:30, keep last 30 days locally.
 30 2 * * *  cd /opt/R2-backup-uploader && REQUIRE_CONFIRM=false ./bin/r2-upload.sh --config /etc/r2/prod.env >> /var/log/r2-upload.log 2>&1
 
-# Weekly archive rotation: download last week's logs and delete from R2.
+# Weekly review: download last week's logs to a local archive (non-destructive).
+# DOWNLOAD_DELETE_REMOTE=false is explicit so a stale .env can't silently flip this
+# into a destructive DR rotation. To actually rotate, add --delete-remote and drop
+# the env var below.
 0 4 * * 0  cd /opt/R2-backup-uploader && REQUIRE_CONFIRM=false DOWNLOAD_DELETE_REMOTE=false ./bin/r2-download.sh --config /etc/r2/prod.env --prefix "logs/$(hostname)/" >> /var/log/r2-download.log 2>&1
 
 # Hourly sync of recent backups to a staging bucket.

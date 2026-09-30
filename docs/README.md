@@ -37,6 +37,7 @@ R2 Backup Uploader is a lightweight Bash tool that automates **uploading and dow
 - ✅ **Safety checks** (overwrite protection, confirmation prompts)
 - ✅ **Flexible key prefixes** with hostname/date expansion
 - ✅ **Detailed logging** with configurable levels
+- ✅ **Email notifications** via `msmtp` — success / failure summaries, configurable per-run
 - ✅ **Cron-friendly** with non-interactive mode
 - ✅ **Cross-platform** support (Linux + macOS)
 
