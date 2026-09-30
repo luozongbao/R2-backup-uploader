@@ -1,0 +1,26 @@
+# filepath: .gitignore
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Local artefacts
+downloads/
+*.tar.gz
+*.tgz
+*.zip
+
+# Logs
+*.log
+/var/log/
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# ShellCheck artefacts
+.shellcheckrc

@@ -27,15 +27,17 @@ R2 Backup Uploader is a lightweight Bash tool that automates **uploading and dow
 
 ## Features
 
-- ✅ **Upload** files or directories (auto-compressed as tar.gz) to R2
+- ✅ **Upload** files or directories (each file as a separate object) to R2
 - ✅ **Download** individual keys or sync entire prefixes back from R2
 - ✅ **Per-account configuration** via `.env` files
-- ✅ **Automatic compression** (tar.gz) for directory sources
+- ✅ **Auto-archive** verified uploads into a dated folder
+- ✅ **SHA-256 checksum verification** after every upload
 - ✅ **Dry-run mode** for safe testing
 - ✅ **Retry logic** with configurable attempts and delays
 - ✅ **Safety checks** (overwrite protection, confirmation prompts)
 - ✅ **Flexible key prefixes** with hostname/date expansion
 - ✅ **Detailed logging** with configurable levels
+- ✅ **Email notifications** via `msmtp` — success / failure summaries, configurable per-run
 - ✅ **Cron-friendly** with non-interactive mode
 - ✅ **Cross-platform** support (Linux + macOS)
 
@@ -69,7 +71,7 @@ R2-backup-uploader/
 
 - **Bash** >= 4.0
 - **AWS CLI v2** (supports Cloudflare R2 via custom endpoints)
-- **tar** (for directory compression)
+- **msmtp** (optional — only required if you want email notifications; see [Email Notifications](#email-notifications))
 - **Standard Unix tools**: `date`, `hostname`, `sed`, `grep`
 
 ### Install AWS CLI v2
@@ -127,9 +129,10 @@ R2_MULTIPART_THRESHOLD="64MB"
 R2_MULTIPART_CHUNKSIZE="32MB"
 
 # ---- Source (upload only) ----
-SOURCE_PATH="/var/backups"
-SOURCE_COMPRESS="true"
-SOURCE_KEEP_LOCAL="false"
+SOURCE_PATH="/var/backups"            # file OR directory (each file uploaded as separate object)
+ARCHIVE_AFTER_UPLOAD="true"          # move uploaded files to archive folder after success
+SOURCE_ARCHIVE_DIR="/var/backups/.archive"  # required when ARCHIVE_AFTER_UPLOAD=true
+SOURCE_ARCHIVE_ORGANIZE="$(date)"     # subdir under archive; supports $(hostname), $(date)
 
 # ---- Download Behaviour ----
 DOWNLOAD_DEST="./downloads/"
@@ -170,9 +173,10 @@ LOG_FILE=""
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `SOURCE_PATH` | File or directory to upload | — | ✅ for upload |
-| `SOURCE_COMPRESS` | Compress directories with tar.gz | `true` | ❌ |
-| `SOURCE_KEEP_LOCAL` | Keep local files after upload | `false` | ❌ |
+| `SOURCE_PATH` | File or directory to upload (each regular file uploaded as a separate object) | — | ✅ for upload |
+| `ARCHIVE_AFTER_UPLOAD` | Move uploaded files to `SOURCE_ARCHIVE_DIR` after verified upload | `true` | ❌ |
+| `SOURCE_ARCHIVE_DIR` | Local archive directory (required when `ARCHIVE_AFTER_UPLOAD=true`) | — | conditional |
+| `SOURCE_ARCHIVE_ORGANIZE` | Subdir pattern under archive; supports `$(hostname)` and `$(date)` | `$(date)` | ❌ |
 
 **Download**
 
@@ -194,6 +198,18 @@ LOG_FILE=""
 | `LOG_LEVEL` | Logging level (`debug` \| `info` \| `warn` \| `error`) | `info` | ❌ |
 | `LOG_FILE` | Log file path (empty = stderr only) | `""` | ❌ |
 
+**Email Notifications** (sender comes from `~/.msmtprc`)
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `EMAIL_ENABLED` | Master switch for notifications | `false` | ❌ |
+| `EMAIL_TO` | Recipients (comma-separated supported) | `""` | ✅ if `EMAIL_ENABLED` |
+| `EMAIL_SUBJECT_OK` | Subject on success (supports `$(hostname)`, `$(date)`) | `[R2] Upload OK: ...` | ❌ |
+| `EMAIL_SUBJECT_FAIL` | Subject on failure | `[R2] Upload FAILED: ...` | ❌ |
+| `EMAIL_ON_SUCCESS` | Send on successful run | `true` | ❌ |
+| `EMAIL_ON_FAILURE` | Send on failed run | `true` | ❌ |
+| `MSMTP_ACCOUNT` | Which `~/.msmtprc` account to use | `default` | ❌ |
+
 ---
 
 ## Usage
@@ -211,6 +227,7 @@ LOG_FILE=""
 | `--config <path>` | Path to `.env` file (default: `./.env`) |
 | `--source <path>` | Override `SOURCE_PATH` from config |
 | `--dry-run` | Show what would happen without uploading |
+| `-e`, `--email [ADDR]` | Send notification email. If `ADDR` is given it overrides `EMAIL_TO`; if omitted, `EMAIL_TO` from `.env` is used. Errors if neither is set. |
 | `--help` | Show help message |
 
 ---
@@ -241,13 +258,32 @@ REQUIRE_CONFIRM=false DRY_RUN=false ./bin/r2-upload.sh --config /etc/r2/prod.env
 ./bin/r2-upload.sh --source /path/to/backup.tar.gz
 ```
 
-### Example 5: Upload a Directory (Auto-Compressed)
+### Example 5: Upload a Directory (Each File Separately)
 
 ```bash
 ./bin/r2-upload.sh --source /var/www/html
 ```
 
-The script will automatically create a tar.gz archive of the directory before uploading.
+Each regular file in the top level of `/var/www/html` is uploaded as its own R2 object. After successful upload (and checksum verification), files are moved into `SOURCE_ARCHIVE_DIR/$(date)/` so the next run only sees new/changed files.
+
+> The script does **not** recurse. Backups are expected to be a flat dump folder (e.g. `/var/backups/*.sql.gz`). If you need recursion, pre-stage them or use `find ... -exec cp {} staging/ \;`.
+
+---
+
+### Archive Pattern (Verified Upload → Move Aside)
+
+The default upload flow is designed to keep your backup folder clean while giving you a verifiable, auditable trail:
+
+1. **Discover** — every regular file in `SOURCE_PATH` (top-level only).
+2. **Check existing objects** — skip keys that already exist unless `R2_OVERWRITE=true`.
+3. **Upload** — `aws s3 cp` with retry, tagged `R2_STORAGE_CLASS`.
+4. **Verify** — compute local SHA-256, fetch remote object, compare.
+5. **Archive** — on verify-success and `ARCHIVE_AFTER_UPLOAD=true`, move the file to `SOURCE_ARCHIVE_DIR/<$(date) subdir>/`. Name collisions are resolved with a `-<timestamp>` suffix.
+6. **Email** — at the end of the run, send a summary (success / failure / dry-run) with counts and durations.
+
+This means the next cron run only sees *new* files in `SOURCE_PATH`, and you always have a local archive folder organised by date for forensics.
+
+**Disabling archive**: set `ARCHIVE_AFTER_UPLOAD=false` to keep files in place after upload. `SOURCE_ARCHIVE_DIR` then becomes optional and is ignored.
 
 ---
 
@@ -271,6 +307,7 @@ The `r2-download.sh` script retrieves data from R2. Because R2 is S3-compatible,
 | `--dest <dir>` | Override `DOWNLOAD_DEST` |
 | `--delete-remote` | Delete from R2 after successful download (DR rotation) |
 | `--dry-run` | Show what would happen without downloading |
+| `-e`, `--email [ADDR]` | Send notification email. If `ADDR` is given it overrides `EMAIL_TO`; if omitted, `EMAIL_TO` from `.env` is used. Errors if neither is set. |
 | `--help` | Show help message |
 
 > If neither `--key` nor `--prefix` is given, the script syncs the expanded `R2_PATH_PREFIX`.
@@ -309,17 +346,103 @@ DRY_RUN=true REQUIRE_CONFIRM=false ./bin/r2-download.sh --config .env
 
 > ⚠️ `--delete-remote` is destructive. Run with `--dry-run` first to verify which objects would be removed.
 
-### Restoring a Compressed Directory
+### Restoring a Directory
 
-If the upload was a tar.gz archive (from `SOURCE_COMPRESS=true`), restore with:
+If you uploaded a directory whose contents are tar.gz archives, restore one with:
 
 ```bash
-# Download
-./bin/r2-download.sh --config .env --key backups/web01/site-2026-09-29.tar.gz
+# Download a single backup
+./bin/r2-download.sh --config .env --key backups/web01/db-2026-09-29.sql.gz
 
 # Extract
-tar -xzf ./downloads/site-2026-09-29.tar.gz -C /var/www/
+tar -xzf ./downloads/db-2026-09-29.sql.gz -C /var/backups/
 ```
+
+---
+
+## Email Notifications
+
+Both scripts can send a plain-text email summary at the end of each run (success or failure). The **sender** address is taken from your `~/.msmtprc` file, so configure that once and don't worry about it per-script.
+
+### Install `msmtp`
+
+| Distro | Command |
+|--------|---------|
+| Ubuntu / Debian | `sudo apt-get install msmtp msmtp-mta` |
+| RHEL / Fedora | `sudo dnf install msmtp` |
+| macOS | `brew install msmtp` |
+
+### Configure `~/.msmtprc`
+
+```ini
+# filepath: ~/.msmtprc
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        ~/.msmtp.log
+
+account        default
+host           smtp.gmail.com
+port           587
+from           your-email@example.com
+user           your-email@example.com
+passwordeval   "security find-generic-password -ws 'msmtp'"
+
+# Or use a different account:
+account        ops
+host           smtp.example.com
+port           587
+from           ops@example.com
+user           ops@example.com
+password       your-app-password
+```
+
+Then `chmod 600 ~/.msmtprc`.
+
+### Enable in `.env`
+
+Set `EMAIL_ENABLED=true` and provide recipients:
+
+```bash
+EMAIL_ENABLED="true"
+EMAIL_TO="ops@example.com,oncall@example.com"   # comma-separated for multiple
+EMAIL_SUBJECT_OK="[R2] OK: $(hostname) at $(date)"
+EMAIL_SUBJECT_FAIL="[R2] FAILED: $(hostname) at $(date)"
+EMAIL_ON_SUCCESS="true"
+EMAIL_ON_FAILURE="true"
+MSMTP_ACCOUNT="ops"                             # which account from .msmtprc
+```
+
+### Usage
+
+```bash
+# Use EMAIL_TO from .env (when EMAIL_ENABLED=true)
+./bin/r2-upload.sh
+
+# Force email for this run, overriding EMAIL_TO
+./bin/r2-upload.sh --email someone@example.com
+
+# Force email for this run, no ADDRESS — uses EMAIL_TO from .env
+./bin/r2-upload.sh --email
+```
+
+> ⚠️ If `-e/--email` is given but neither an address nor `EMAIL_TO` is configured, the script **errors out before doing any work** — so check your config first.
+
+### Email Body
+
+The body is plain-text and includes:
+
+- Operation (`upload` / `download`), status (`success` / `failure` / `dry-run`), exit code
+- Hostname, start/finish timestamps, duration
+- Key-value summary of the run (source, destination, bucket, key, dry-run flag, etc.)
+- **Full log buffer** for the run — every `[INFO]` / `[WARN]` / `[ERROR]` line captured during execution
+
+### Disabling Per-Run
+
+- `EMAIL_ON_SUCCESS=false` → no email on success
+- `EMAIL_ON_FAILURE=false` → no email on failure
+- `EMAIL_ENABLED=false` → no email at all (CLI `-e` still forces `true`)
 
 ---
 
@@ -329,7 +452,7 @@ tar -xzf ./downloads/site-2026-09-29.tar.gz -C /var/www/
 
 - **Bash** >= 4.0
 - **AWS CLI v2** (install instructions above)
-- **tar** (for directory compression)
+- **tar** (optional; only used in restoration examples)
 - **ShellCheck** (optional, for linting)
 
 ### Install ShellCheck
@@ -376,10 +499,9 @@ Future enhancements planned for upcoming versions:
 
 - 🔄 **Multiple account profiles** — switch between R2 accounts easily
 - 🔐 **Pre-upload encryption** — encrypt backups with age/gpg before upload
-- 🧪 **Automated tests** — GitHub Actions workflow for CI lint
+- 🧪 **Automated tests** — GitHub Actions workflow for real R2 round-trip
 - 📊 **Upload/download statistics** — track history and metrics
-- 🗜️ **Advanced compression options** — support for zstd, bzip2, etc.
-- 🔁 **End-to-end verify** — checksum compare after download
+- 📂 **Recursive directory uploads** — walk subdirectories on demand
 
 ---
 
