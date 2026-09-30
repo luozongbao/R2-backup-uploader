@@ -50,10 +50,17 @@ r2::log() {
     local line
     line="$(date -u '+%Y-%m-%dT%H:%M:%SZ') [${level^^}] ${msg}"
 
-    if [[ -n "${LOG_FILE:-}" ]]; then
-        printf '%s\n' "$line" >> "$LOG_FILE"
+    # Live sink: stdout when running interactively (a user is watching the
+    # terminal), stderr otherwise (cron, pipes, redirects). The LOG_FILE, if
+    # set, always receives the same line so the on-disk log stays in sync with
+    # what the user (or cron) sees.
+    if [[ -t 1 ]]; then
+        printf '%s\n' "$line"
     else
         printf '%s\n' "$line" >&2
+    fi
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        printf '%s\n' "$line" >> "$LOG_FILE"
     fi
 }
 

@@ -10,6 +10,39 @@ This project follows [Semantic Versioning](https://semver.org/) and the
 
 ---
 
+## [Unreleased]
+
+Changes since the `1.0.0` stable cut. These are documented ahead of the next
+release so users on `dev` can track what's new between tags.
+
+### Changed
+
+- **Variable rename: `SOURCE_DELETE_AFTER` → `ARCHIVE_AFTER_UPLOAD`.** The old
+  name was misleading (the code *moves* files, it does not delete them). Update
+  your `.env` accordingly. A temporary back-compat shim can be added in
+  `lib/r2.sh` if you still have `SOURCE_DELETE_AFTER` set; see the commit that
+  introduced the rename for the one-line shim. Docs (`docs/README.md`,
+  `docs/About.md`, `examples/.env.example`) and code defaults already use the
+  new name.
+- **`LOG_FILE` behaviour refined.** Log lines are now written to **stdout when
+  the script runs interactively** (stdout is a TTY) and to **stderr otherwise**
+  (cron, pipes, redirects). The `LOG_FILE`, when set, always receives the same
+  lines regardless of which sink is used. Previously, setting `LOG_FILE`
+  suppressed the live output entirely.
+- **Early-fatal CLI errors now reach the log file too.** The "unknown option"
+  and missing-`EMAIL_TO` errors at startup used to print only to stderr; they
+  now also append to `LOG_FILE` if one is set, matching the behaviour of every
+  other log line.
+
+### Notes
+
+- No API removal yet. `SOURCE_DELETE_AFTER` is not silently translated by the
+  current code — only the renamed variable is honoured. If you depend on the
+  old name, add the shim noted above or update your `.env` before the next cron
+  run.
+
+---
+
 ## [1.0.0] — 2026-09-30 · First stable release
 
 The first production-ready release of R2 Backup Uploader. The upload and

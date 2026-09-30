@@ -11,6 +11,22 @@
 
 set -euo pipefail
 
+# Tiny pre-load fatal logger: mirrors r2::log's TTY-aware sink + honours an
+# externally-set LOG_FILE (cron can set it before invoking the script). Used
+# only for CLI parse errors that fire before lib/r2.sh is sourced.
+__r2_fatal() {
+    local line
+    line="$(date -u '+%Y-%m-%dT%H:%M:%SZ') [ERROR] $*"
+    if [[ -t 1 ]]; then
+        printf '%s\n' "$line"
+    else
+        printf '%s\n' "$line" >&2
+    fi
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        printf '%s\n' "$line" >> "$LOG_FILE"
+    fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=../lib/r2.sh
 source "${SCRIPT_DIR}/../lib/r2.sh"
@@ -65,7 +81,7 @@ while (( $# > 0 )); do
             fi
             ;;
         --help|-h)       usage; exit 0 ;;
-        *) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+        *) __r2_fatal "Unknown option: $1"; usage; exit 2 ;;
     esac
 done
 
@@ -83,7 +99,7 @@ if [[ "$EMAIL_CLI_FLAG" == "true" ]]; then
         __R2_RUN_EMAIL_OVERRIDE="$EMAIL_VALUE"
     fi
     if [[ -z "$EMAIL_VALUE" && -z "${EMAIL_TO:-}" ]]; then
-        echo "Error: -e/--email requested but no EMAIL_TO set in .env and no ADDRESS given" >&2
+        r2::log error "-e/--email requested but no EMAIL_TO set in .env and no ADDRESS given"
         exit 2
     fi
 fi

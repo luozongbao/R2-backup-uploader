@@ -196,7 +196,7 @@ LOG_FILE=""
 | `RETRY_COUNT` | Number of retry attempts | `3` | ❌ |
 | `RETRY_DELAY` | Delay between retries (seconds) | `5` | ❌ |
 | `LOG_LEVEL` | Logging level (`debug` \| `info` \| `warn` \| `error`) | `info` | ❌ |
-| `LOG_FILE` | Log file path (empty = stderr only) | `""` | ❌ |
+| `LOG_FILE` | Optional log file path. Log lines are emitted to **stdout when interactive** (stdout is a TTY) and **stderr otherwise** (cron, pipes). When this is set, the same lines are also appended to the file regardless of the live sink. | `""` | ❌ |
 
 **Email Notifications** (sender comes from `~/.msmtprc`)
 
