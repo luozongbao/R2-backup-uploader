@@ -542,9 +542,9 @@ EOF
     rm -f "$tmp"
 
     if (( rc != 0 )); then
-        r2::error "msmtp exited with rc=${rc}; notification email not sent"
+        r2::tee_log error "msmtp exited with rc=${rc}; notification email not sent"
     else
-        r2::info "Notification email sent to: ${recipients// /, }"
+        r2::tee_log info "Notification email sent to: ${recipients// /, }"
     fi
     return 0
 }
